@@ -1,0 +1,169 @@
+{
+  "Comment": "Jump Cut 自動化を行うステートマシン",
+  "StartAt": "StartTranscribeJob",
+  "States": {
+    "StartTranscribeJob": {
+      "Comment": "Transcribe を起動し日本語音声の書き起こしを開始",
+      "Type": "Task",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "IntervalSeconds": 10,
+          "MaxAttempts": 10,
+          "BackoffRate": 1
+        }
+      ],
+      "Resource": "${StartTranscribeFunctionArn}",
+      "InputPath": "$",
+      "ResultPath": "$.result",
+      "Next": "CheckTranscribeJob"
+    },
+    "CheckTranscribeJob": {
+      "Comment": "Transcribe の書き起こしジョブが完了したか確認",
+      "Type": "Task",
+      "Resource": "${CheckTranscribeFunctionArn}",
+      "InputPath": "$",
+      "ResultPath": "$.iterator",
+      "Next": "CheckTranscribeCompletion"
+    },
+    "CheckTranscribeCompletion": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Comment": "書き起こしジョブが終了していない場合",
+          "Variable": "$.iterator.is_continue",
+          "BooleanEquals": true,
+          "Next": "CheckTranscribeWait"
+        },
+        {
+          "Comment": "書き起こしジョブが終了した場合",
+          "Variable": "$.iterator.is_continue",
+          "BooleanEquals": false,
+          "Next": "CheckTranscribeTimeout"
+        }
+      ],
+      "Default": "Failure"
+    },
+    "CheckTranscribeWait": {
+      "Comment": "10 秒間待機し書き起こし完了を再チェック",
+      "Type": "Wait",
+      "Seconds": 10,
+      "Next": "CheckTranscribeJob"
+    },
+    "CheckTranscribeTimeout": {
+      "Comment": "書き起こしが時間内に完了しなかった場合",
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Comment": "書き起こしが時間内に完了している場合",
+          "Variable": "$.iterator.is_timeout",
+          "BooleanEquals": false,
+          "Next": "DownloadSourceMovie"
+        }
+      ],
+      "Default": "Failure"
+    },
+    "Failure": {
+      "Comment": "ステートマシンを失敗として終了",
+      "Type": "Fail"
+    },
+    "DownloadSourceMovie": {
+      "Comment": "EFS に動画をダウンロード",
+      "Type": "Task",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "IntervalSeconds": 10,
+          "MaxAttempts": 10,
+          "BackoffRate": 1
+        }
+      ],
+      "Resource": "${DownloadSourceMovieFunctionArn}",
+      "InputPath": "$",
+      "ResultPath": "$.result",
+      "Next": "AnalyzeTranscribeJob"
+    },
+    "AnalyzeTranscribeJob": {
+      "Comment": "書き起こし結果をもとに発話区間を解析",
+      "Type": "Task",
+      "Resource": "${AnalyzeTranscribeFunctionArn}",
+      "InputPath": "$",
+      "ResultPath": "$.file_count",
+      "Next": "CheckClippingStatus"
+    },
+    "CheckClippingStatus": {
+      "Comment": "動画のカットが完了したか確認",
+      "Type": "Task",
+      "Resource": "${CheckClippingStatusFunctionArn}",
+      "InputPath": "$",
+      "ResultPath": "$.iterator",
+      "Next": "CheckClippingCompletion"
+    },
+    "CheckClippingCompletion": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Comment": "動画のカットが終了していない場合",
+          "Variable": "$.iterator.is_continue",
+          "BooleanEquals": true,
+          "Next": "CheckClippingWait"
+        },
+        {
+          "Comment": "動画のカットが終了した場合",
+          "Variable": "$.iterator.is_continue",
+          "BooleanEquals": false,
+          "Next": "CheckClippingTimeout"
+        }
+      ],
+      "Default": "Failure"
+    },
+    "CheckClippingWait": {
+      "Comment": "10 秒間待機し動画のカット完了を再チェック",
+      "Type": "Wait",
+      "Seconds": 10,
+      "Next": "CheckClippingStatus"
+    },
+    "CheckClippingTimeout": {
+      "Comment": "動画のカットが時間内に完了しなかった場合",
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Comment": "動画のカットが時間内に完了している場合",
+          "Variable": "$.iterator.is_timeout",
+          "BooleanEquals": false,
+          "Next": "ConcatMovies"
+        }
+      ],
+      "Default": "Failure"
+    },
+    "ConcatMovies": {
+      "Comment": "カットした動画を EFS 上で結合",
+      "Type": "Task",
+      "Resource": "${ConcatMoviesFunctionArn}",
+      "InputPath": "$",
+      "ResultPath": "$.iterator",
+      "Next": "UploadMovie"
+    },
+    "UploadMovie": {
+      "Comment": "結合した動画を S3 へアップロード",
+      "Type": "Task",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "IntervalSeconds": 10,
+          "MaxAttempts": 10,
+          "BackoffRate": 1
+        }
+      ],
+      "Resource": "${UploadMovieFunctionArn}",
+      "InputPath": "$",
+      "End": true
+    }
+  }
+}

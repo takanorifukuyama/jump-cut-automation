@@ -1,0 +1,551 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Solution for jet-cut automation to get ready for YouTuber debut!
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterLabels:
+      NoSoundCutDuration:
+        default: "カットする無音区間の長さ"
+
+Parameters:
+  NoSoundCutDuration:
+    Description: "ここで指定した時間の無音が生じた場合、動画がカットされます"
+    Type: Number
+    Default: 0.2
+
+Globals:
+  Function:
+    Timeout: 30
+    MemorySize: 128
+    Runtime: python3.8
+    Environment:
+      Variables:
+        REGION: !Sub ${AWS::Region}
+
+Resources:
+  # ------------------------------------------------------------#
+  #  VPC および Subnet
+  # ------------------------------------------------------------#
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: "10.0.0.0/16"
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-vpc"
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+
+  InternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref Vpc
+
+  NATGatewayA: 
+    Type: AWS::EC2::NatGateway
+    Properties: 
+      AllocationId: !GetAtt NATGatewayAEip.AllocationId 
+      SubnetId: !Ref PublicSubnetA
+
+  NATGatewayAEip: 
+    Type: AWS::EC2::EIP
+    Properties: 
+      Domain: vpc
+
+  PublicSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Select [ 0, !GetAZs '' ]
+      CidrBlock: "10.0.10.0/24"
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-public-subnet-a"
+
+  PublicRouteTableA:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+
+  PublicRouteA:
+    Type: AWS::EC2::Route
+    DependsOn: 
+      - InternetGateway
+      - InternetGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTableA
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnetARouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnetA
+      RouteTableId: !Ref PublicRouteTableA
+
+  NATGatewayB: 
+    Type: AWS::EC2::NatGateway
+    Properties: 
+      AllocationId: !GetAtt NATGatewayBEip.AllocationId 
+      SubnetId: !Ref PublicSubnetB
+
+  NATGatewayBEip: 
+    Type: AWS::EC2::EIP
+    Properties: 
+      Domain: vpc
+
+  PublicSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Select [ 1, !GetAZs '' ]
+      CidrBlock: "10.0.20.0/24"
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-public-subnet-b"
+
+  PublicRouteTableB:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+
+  PublicRouteB:
+    Type: AWS::EC2::Route
+    DependsOn: 
+      - InternetGateway
+      - InternetGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTableB
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnetBRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnetB
+      RouteTableId: !Ref PublicRouteTableB
+
+  EfsLambdaSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "Lambda Security Group for EFS Access"
+      VpcId: !Ref Vpc
+      SecurityGroupEgress:
+        - CidrIp: "0.0.0.0/0"
+          FromPort: 0
+          ToPort: 65535
+          IpProtocol: tcp
+      SecurityGroupIngress:
+        - CidrIp: "0.0.0.0/0"
+          FromPort: 0
+          ToPort: 65535
+          IpProtocol: tcp
+
+  PrivateSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      AvailabilityZone: !Select [ 0, !GetAZs '' ]
+      MapPublicIpOnLaunch: false
+      CidrBlock: "10.0.0.0/24"
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-private-subnet-a"
+
+  PrivateRouteTableA:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+
+  PrivateRouteA:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTableA
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NATGatewayA
+
+  PrivateSubnetARouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnetA
+      RouteTableId: !Ref PrivateRouteTableA
+
+  PrivateSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      AvailabilityZone: !Select [ 1, !GetAZs '' ]
+      MapPublicIpOnLaunch: false
+      CidrBlock: "10.0.1.0/24"
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-private-subnet-b"
+
+  PrivateRouteTableB:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+
+  PrivateRouteB:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTableB
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NATGatewayB
+
+  PrivateSubnetBRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnetB
+      RouteTableId: !Ref PrivateRouteTableB
+
+  # ------------------------------------------------------------#
+  #  EFS
+  # ------------------------------------------------------------#
+  EfsFileSystem:
+    Type: AWS::EFS::FileSystem
+
+  MountTargetA:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref EfsFileSystem
+      SubnetId: !Ref PrivateSubnetA
+      SecurityGroups:
+        - !Ref EfsLambdaSecurityGroup
+
+  MountTargetB:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref EfsFileSystem
+      SubnetId: !Ref PrivateSubnetB
+      SecurityGroups:
+        - !Ref EfsLambdaSecurityGroup
+
+  AccessPoint:
+    Type: AWS::EFS::AccessPoint
+    Properties:
+      FileSystemId: !Ref EfsFileSystem
+      PosixUser:
+        Gid: "1000"
+        Uid: "1000"
+      RootDirectory:
+        Path: "/lambda"
+        CreationInfo:
+          OwnerGid: "1000"
+          OwnerUid: "1000"
+          Permissions: "755"
+
+  # ------------------------------------------------------------#
+  #  S3 バケット
+  # ------------------------------------------------------------#
+  S3InputBucket:
+    Type: AWS::S3::Bucket
+
+  S3OutputBucket:
+    Type: AWS::S3::Bucket
+
+  # ------------------------------------------------------------#
+  #  SQS
+  # ------------------------------------------------------------#
+  SqsQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      VisibilityTimeout: 300
+
+  # ------------------------------------------------------------#
+  #  DynamoDB
+  # ------------------------------------------------------------#
+  DynamoTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+        TableName: movie_clips
+        AttributeDefinitions:
+          - AttributeName: job_name
+            AttributeType: S
+          - AttributeName: index
+            AttributeType: N
+        KeySchema:
+          - AttributeName: job_name
+            KeyType: HASH
+          - AttributeName: index
+            KeyType: RANGE
+        BillingMode: PAY_PER_REQUEST
+
+  # ------------------------------------------------------------#
+  #  Lambda 関数
+  # ------------------------------------------------------------#
+  StartStateMachineFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: aws_controllers/
+      Handler: step_functions.start_state_machine
+      Policies:
+        - StepFunctionsExecutionPolicy:
+            StateMachineName: !Sub "${AWS::StackName}-state-machine"
+      Environment:
+        Variables:
+          STATE_MACHINE_ARN: !Sub "arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:${AWS::StackName}-state-machine"
+      Events:
+        CreateObject:
+          Type: S3
+          Properties:
+            Bucket: !Ref S3InputBucket
+            Events:
+              - s3:ObjectCreated:*
+            Filter:
+              S3Key:
+                Rules:
+                - Name: suffix
+                  Value: .mp4
+
+  StartTranscribeFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: aws_controllers/
+      Handler: transcribe.start_job
+      Policies:
+        - AmazonTranscribeFullAccess
+        - AmazonS3FullAccess
+      Environment:
+        Variables:
+          S3_INPUT_BUCKET_NAME: !Ref S3InputBucket
+          S3_OUTPUT_BUCKET_NAME: !Ref S3OutputBucket
+
+  CheckTranscribeFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: job_orchestrators/
+      Handler: waiter.check_transcribe_status
+      Policies:
+        - AmazonTranscribeFullAccess
+      Environment:
+        Variables:
+          DYNAMODB_TABLE_NAME: !Ref DynamoTable
+
+  DownloadSourceMovieFunction:
+    Type: AWS::Serverless::Function
+    DependsOn:
+      - MountTargetA
+      - MountTargetB
+    Properties:
+      MemorySize: 1856
+      Timeout: 300
+      CodeUri: aws_controllers/
+      Handler: s3.download_movie
+      Policies:
+        - AmazonS3FullAccess
+        - EFSWriteAccessPolicy:
+            FileSystem: !Ref EfsFileSystem
+            AccessPoint: !Ref AccessPoint
+      Environment:
+        Variables:
+          S3_INPUT_BUCKET_NAME: !Ref S3InputBucket
+          S3_OUTPUT_BUCKET_NAME: !Ref S3OutputBucket
+      VpcConfig:
+        SecurityGroupIds:
+          - !Ref EfsLambdaSecurityGroup
+        SubnetIds:
+          - !Ref PrivateSubnetA
+          - !Ref PrivateSubnetB
+      FileSystemConfigs:
+        - Arn: !GetAtt AccessPoint.Arn
+          LocalMountPath: /mnt/lambda
+
+  AnalyzeTranscribeFunction:
+    Type: AWS::Serverless::Function
+    DependsOn:
+      - MountTargetA
+      - MountTargetB
+    Properties:
+      MemorySize: 1856
+      Timeout: 300
+      CodeUri: job_orchestrators/
+      Handler: analyzer.analyze_speech
+      Policies:
+        - AmazonSQSFullAccess
+        - DynamoDBCrudPolicy:
+            TableName: !Ref DynamoTable
+        - EFSWriteAccessPolicy:
+            FileSystem: !Ref EfsFileSystem
+            AccessPoint: !Ref AccessPoint
+      Environment:
+        Variables:
+          DYNAMODB_TABLE_NAME: !Ref DynamoTable
+          SQS_QUEUE_NAME: !GetAtt SqsQueue.QueueName
+          NO_SOUND_DURATION: !Ref NoSoundCutDuration
+      VpcConfig:
+        SecurityGroupIds:
+          - !Ref EfsLambdaSecurityGroup
+        SubnetIds:
+          - !Ref PrivateSubnetA
+          - !Ref PrivateSubnetB
+      FileSystemConfigs:
+        - Arn: !GetAtt AccessPoint.Arn
+          LocalMountPath: /mnt/lambda
+
+  CheckClippingStatusFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: job_orchestrators/
+      Handler: waiter.check_clipping_status
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref DynamoTable
+      Environment:
+        Variables:
+          DYNAMODB_TABLE_NAME: !Ref DynamoTable
+
+  ClipMovieFunction:
+    Type: AWS::Serverless::Function
+    DependsOn:
+      - MountTargetA
+      - MountTargetB
+    Properties:
+      MemorySize: 1856
+      Timeout: 300
+      CodeUri: movie_formatters/
+      Handler: movie.clip_speech
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref DynamoTable
+        - EFSWriteAccessPolicy:
+            FileSystem: !Ref EfsFileSystem
+            AccessPoint: !Ref AccessPoint
+      Environment:
+        Variables:
+          DYNAMODB_TABLE_NAME: !Ref DynamoTable
+          S3_OUTPUT_BUCKET_NAME: !Ref S3OutputBucket
+      VpcConfig:
+        SecurityGroupIds:
+          - !Ref EfsLambdaSecurityGroup
+        SubnetIds:
+          - !Ref PrivateSubnetA
+          - !Ref PrivateSubnetB
+      FileSystemConfigs:
+        - Arn: !GetAtt AccessPoint.Arn
+          LocalMountPath: /mnt/lambda
+      Events:
+        SQSEvent:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt SqsQueue.Arn
+            BatchSize: 10
+
+  ConcatMoviesFunction:
+    Type: AWS::Serverless::Function
+    DependsOn:
+      - MountTargetA
+      - MountTargetB
+    Properties:
+      MemorySize: 1856
+      Timeout: 300
+      CodeUri: movie_formatters/
+      Handler: movie.concat_speech
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref DynamoTable
+        - EFSWriteAccessPolicy:
+            FileSystem: !Ref EfsFileSystem
+            AccessPoint: !Ref AccessPoint
+      Environment:
+        Variables:
+          DYNAMODB_TABLE_NAME: !Ref DynamoTable
+          S3_OUTPUT_BUCKET_NAME: !Ref S3OutputBucket
+      VpcConfig:
+        SecurityGroupIds:
+          - !Ref EfsLambdaSecurityGroup
+        SubnetIds:
+          - !Ref PrivateSubnetA
+          - !Ref PrivateSubnetB
+      FileSystemConfigs:
+        - Arn: !GetAtt AccessPoint.Arn
+          LocalMountPath: /mnt/lambda
+
+  UploadMovieFunction:
+    Type: AWS::Serverless::Function
+    DependsOn:
+      - MountTargetA
+      - MountTargetB
+    Properties:
+      MemorySize: 1856
+      Timeout: 300
+      CodeUri: aws_controllers/
+      Handler: s3.upload_movie
+      Policies:
+        - AmazonS3FullAccess
+        - EFSWriteAccessPolicy:
+            FileSystem: !Ref EfsFileSystem
+            AccessPoint: !Ref AccessPoint
+      Environment:
+        Variables:
+          S3_INPUT_BUCKET_NAME: !Ref S3InputBucket
+          S3_OUTPUT_BUCKET_NAME: !Ref S3OutputBucket
+      VpcConfig:
+        SecurityGroupIds:
+          - !Ref EfsLambdaSecurityGroup
+        SubnetIds:
+          - !Ref PrivateSubnetA
+          - !Ref PrivateSubnetB
+      FileSystemConfigs:
+        - Arn: !GetAtt AccessPoint.Arn
+          LocalMountPath: /mnt/lambda
+
+  # ------------------------------------------------------------#
+  #  Step Functions
+  # ------------------------------------------------------------#
+  IAMPassRolePolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: "Allow"
+            Resource: "*"
+            Action:
+              - "iam:PassRole"
+
+  JumpCutStateMachine:
+    Type: AWS::Serverless::StateMachine
+    DependsOn:
+      - IAMPassRolePolicy
+      - StartTranscribeFunction
+      - CheckTranscribeFunction
+      - AnalyzeTranscribeFunction
+      - DownloadSourceMovieFunction
+      - CheckClippingStatusFunction
+      - ConcatMoviesFunction
+      - UploadMovieFunction
+    Properties:
+      Name: !Sub "${AWS::StackName}-state-machine"
+      DefinitionUri: sfn_definition.json
+      DefinitionSubstitutions:
+        StartTranscribeFunctionArn: !GetAtt StartTranscribeFunction.Arn
+        CheckTranscribeFunctionArn: !GetAtt CheckTranscribeFunction.Arn
+        AnalyzeTranscribeFunctionArn: !GetAtt AnalyzeTranscribeFunction.Arn
+        DownloadSourceMovieFunctionArn: !GetAtt DownloadSourceMovieFunction.Arn
+        CheckClippingStatusFunctionArn: !GetAtt CheckClippingStatusFunction.Arn
+        ConcatMoviesFunctionArn: !GetAtt ConcatMoviesFunction.Arn
+        UploadMovieFunctionArn: !GetAtt UploadMovieFunction.Arn
+      Policies:
+        - !Ref IAMPassRolePolicy
+        - LambdaInvokePolicy:
+            FunctionName: "*"
+
+Outputs:
+  InputS3BucketName:
+    Description: Input S3 Bucket
+    Value: !Ref S3InputBucket
+
+  StepFunctionsName:
+    Description: Step Functions Name
+    Value: !GetAtt JumpCutStateMachine.Name
+
+  OutputS3BucketName:
+    Description: Output S3 Bucket
+    Value: !Ref S3OutputBucket
